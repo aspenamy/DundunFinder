@@ -1,0 +1,7 @@
+package-as: DundunFinder
+
+manual-changelog: CHANGELOG.md
+
+ignore:
+  - README.md
+  - CHANGELOG.md
