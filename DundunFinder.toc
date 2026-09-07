@@ -2,7 +2,8 @@
 ## Title: Dundun Finder
 ## Notes: One keybind that targets Dundun in a bountiful delve and drops a raid marker on him.
 ## Author: Astreae
-## Version: 0.2.0
+## Version: @project-version@
+## X-Curse-Project-ID: 1686100
 ## IconTexture: 647701
 ## X-License: All Rights Reserved
 ## SavedVariables: DundunFinderDB
