@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Updated for 12.1.5.
+- Panel only shows in bountiful delves (not regular delves or The Labyrinth of Kindo'jan).
+- Fixed the panel showing up or staying open outside delves.
+- Added an X to close the panel. `/dundun panel` brings it back.
+- Fixed the "found" banner.
+
 ## 0.2.0
 
 First public build.

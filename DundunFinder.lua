@@ -6,14 +6,19 @@
 --      raid icon on him in one press. Targeting and marking are both
 --      protected in Midnight, so they only ever happen from your own key
 --      press or click; the addon just sets the macro up for you.
---   2. Shows on the panel whether the press found him, with an alert the
---      first time it does, and pulses a quiet reminder until then.
+--   2. Shows a small panel only while you're inside a bountiful delve, which
+--      says whether the press found him, alerts the first time it does, and
+--      pulses a quiet reminder until then. It has a close button for the run.
 --   3. Has a settings page under Options > AddOns > Dundun Finder.
 -------------------------------------------------------------------------------
 
 local ADDON_NAME = ...
 
 local DELVE_DIFFICULTY_ID = 208
+-- A bountiful delve's pin on the zone map uses this art.
+local BOUNTIFUL_ATLAS = "delves-bountiful"
+-- Midnight zones with delves, checked after the maps above the delve itself.
+local DELVE_ZONE_MAPS = { 2393, 2395, 2405, 2413, 2424, 2437, 2443, 2512 }
 local MARK_NAMES = { "Star", "Circle", "Diamond", "Triangle", "Moon", "Square", "Cross", "Skull" }
 local BINDING_KEY = "CLICK DundunFinderButton:LeftButton"
 
@@ -45,7 +50,8 @@ local HIDE_DELAY = 5   -- seconds the "marked" status stays before hideWhenFound
 
 local db
 local state = {
-  inDelve           = false,
+  active            = false,  -- inside a bountiful delve, so the panel belongs on screen
+  dismissed         = false,  -- closed with the X for the rest of this run
   found             = false,  -- a press found and marked him this delve
   nudgeTicker       = nil,
   hideTimer         = nil,
@@ -73,17 +79,59 @@ local function IsSecret(v)
   return issecretvalue and issecretvalue(v)
 end
 
+-- True only while you're standing inside a delve instance. This deliberately
+-- ignores whether a delve run is still open, because a run stays open after
+-- you walk out and the panel shouldn't follow you into the open world.
 local function IsInDelve()
-  if C_PartyInfo and C_PartyInfo.IsDelveInProgress then
-    local ok, r = pcall(C_PartyInfo.IsDelveInProgress)
-    if ok and r then return true end
-  end
+  if not IsInInstance() then return false end
   local _, _, difficultyID = GetInstanceInfo()
   return difficultyID == DELVE_DIFFICULTY_ID
 end
 
+-- True when the delve you're in is bountiful today. There's no direct API for
+-- it, so this finds the delve's pin on a zone map and checks its art: first on
+-- the maps above the delve itself, then on the known Midnight delve zones.
+local function IsBountifulDelve()
+  local instanceName = GetInstanceInfo()
+  local mapID = C_Map.GetBestMapForUnit("player")
+  local mapInfo = mapID and C_Map.GetMapInfo(mapID)
+  local mapName = mapInfo and mapInfo.name
+
+  local zones, seen = {}, {}
+  local function AddZone(id)
+    if id and id > 0 and not seen[id] then
+      seen[id] = true
+      zones[#zones + 1] = id
+    end
+  end
+  local info = mapInfo
+  for _ = 1, 10 do
+    if not (info and info.parentMapID and info.parentMapID > 0) then break end
+    AddZone(info.parentMapID)
+    info = C_Map.GetMapInfo(info.parentMapID)
+  end
+  for _, id in ipairs(DELVE_ZONE_MAPS) do AddZone(id) end
+
+  for _, zoneID in ipairs(zones) do
+    local ok, poiIDs = pcall(C_AreaPoiInfo.GetDelvesForMap, zoneID)
+    if ok and poiIDs then
+      for _, poiID in ipairs(poiIDs) do
+        local okInfo, poi = pcall(C_AreaPoiInfo.GetAreaPOIInfo, zoneID, poiID)
+        if okInfo and poi then
+          local sameDelve = (poi.name and (poi.name == instanceName or poi.name == mapName))
+            or (mapID and poi.linkedUiMapID == mapID)
+          if sameDelve then
+            return poi.atlasName == BOUNTIFUL_ATLAS
+          end
+        end
+      end
+    end
+  end
+  return false
+end
+
 local function IsActive()
-  return db.enabled and state.inDelve
+  return db.enabled and state.active
 end
 
 local function BoundKeyText()
@@ -144,6 +192,21 @@ icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)   -- trim the usual icon border
 local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 title:SetPoint("TOP", 0, -8)
 title:SetText("Dundun Finder")
+
+-- Close button. The stock close template hides its parent directly, which the
+-- game blocks in combat for a panel holding a secure button, so this uses the
+-- version without scripts and handles the click itself further down.
+local closeButton = CreateFrame("Button", nil, frame, "UIPanelCloseButtonNoScripts")
+closeButton:SetSize(20, 20)
+closeButton:SetPoint("TOPRIGHT", -2, -2)
+closeButton:SetFrameLevel(frame:GetFrameLevel() + 5)
+closeButton:SetScript("OnEnter", function(self)
+  GameTooltip:SetOwner(self, "ANCHOR_TOP")
+  GameTooltip:AddLine("Hide until the next delve")
+  GameTooltip:AddLine("The keybind still works while the panel is hidden.", 1, 1, 1, true)
+  GameTooltip:Show()
+end)
+closeButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
 local statusText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 statusText:SetPoint("TOP", title, "BOTTOM", 0, -4)
@@ -231,7 +294,8 @@ end
 
 local function ApplyVisibility()
   local want = state.preview
-    or (db.showFrame and IsActive() and not (db.hideWhenFound and state.found))
+    or (db.showFrame and IsActive() and not state.dismissed
+        and not (db.hideWhenFound and state.found))
   if InCombatLockdown() then
     state.pendingVisibility = true
     return
@@ -280,7 +344,11 @@ local function OnFound()
   if db.announce then
     local msg = ("%s found! Marked with %s."):format(NPC_NAME, MARK_NAMES[db.mark] or "a raid icon")
     Print(msg)
-    if RaidNotice_AddMessage and RaidWarningFrame then
+    -- RaidWarningUtil replaced RaidNotice_AddMessage in 12.1.5, which now only
+    -- exists when the game's deprecation fallbacks are switched on.
+    if RaidWarningUtil and RaidWarningUtil.AddMessage then
+      RaidWarningUtil.AddMessage(msg, ChatTypeInfo["RAID_WARNING"])
+    elseif RaidNotice_AddMessage and RaidWarningFrame then
       RaidNotice_AddMessage(RaidWarningFrame, msg, ChatTypeInfo["RAID_WARNING"])
     end
   end
@@ -331,6 +399,7 @@ end)
 
 local function BeginSearch()
   state.found = false
+  state.dismissed = false
   if not db.enabled then return end
   SetStatus(SearchingStatus(), 1, 0.82, 0)
   StartNudging()
@@ -339,25 +408,27 @@ end
 
 local function EndSearch()
   StopNudging()
+  if state.hideTimer then
+    state.hideTimer:Cancel()
+    state.hideTimer = nil
+  end
   ApplyVisibility()
 end
 
-local function EnterDelve()
-  state.inDelve = true
-  BeginSearch()
-end
-
-local function LeaveDelve()
-  state.inDelve = false
-  EndSearch()
-end
-
+-- Turns the panel on once you're inside a bountiful delve and off as soon as
+-- you leave. Bountiful is only checked on the way in, so a slow map update
+-- partway through a run can't make the panel vanish.
 local function RefreshDelveState()
-  local now = IsInDelve()
-  if now and not state.inDelve then
-    EnterDelve()
-  elseif not now and state.inDelve then
-    LeaveDelve()
+  if not IsInDelve() then
+    if state.active then
+      state.active = false
+      EndSearch()
+    end
+    return
+  end
+  if not state.active and IsBountifulDelve() then
+    state.active = true
+    BeginSearch()
   end
 end
 
@@ -368,7 +439,7 @@ end
 local apply = {}
 
 apply.enabled = function()
-  if db.enabled and state.inDelve then
+  if db.enabled and state.active then
     BeginSearch()
   else
     StopNudging()
@@ -382,6 +453,11 @@ apply.mark = function()
 end
 
 apply.showFrame = function()
+  -- Turning the panel on also brings it back after the X was clicked.
+  if db.showFrame and state.dismissed then
+    state.dismissed = false
+    StartNudging()
+  end
   ApplyVisibility()
 end
 
@@ -409,6 +485,21 @@ local function SetPreview(on)
     ApplyVisibility()
   end
 end
+
+-- The X hides the panel for the rest of this run. In combat the hide waits
+-- until combat ends, since the panel holds a secure button.
+closeButton:SetScript("OnClick", function()
+  if state.preview then
+    SetPreview(false)
+    return
+  end
+  state.dismissed = true
+  StopNudging()
+  if InCombatLockdown() then
+    SetStatus("Closing when combat ends.", 0.7, 0.7, 0.7)
+  end
+  ApplyVisibility()
+end)
 
 -- Set a value, going through the Settings object when the options page exists
 -- so the page stays in sync. Falls back to writing the table directly.
@@ -458,7 +549,7 @@ local function BuildOptionsPage()
   end
 
   AddHeader("General")
-  Checkbox("enabled", "Enable Dundun Finder", "Show the panel in delves and track whether " .. NPC_NAME .. " has been marked.")
+  Checkbox("enabled", "Enable Dundun Finder", "Show the panel in bountiful delves and track whether " .. NPC_NAME .. " has been marked.")
 
   do
     local setting = Register("mark", "Raid icon")
@@ -488,7 +579,7 @@ local function BuildOptionsPage()
   end
 
   AddHeader("Panel")
-  Checkbox("showFrame", "Show panel in delves", "The panel holds the Target button and status text. The keybind works even with the panel hidden.")
+  Checkbox("showFrame", "Show panel in delves", "The panel appears in bountiful delves and holds the Target button and status text. The keybind works even with the panel hidden.")
   Checkbox("hideWhenFound", "Hide panel once he's marked", ("Hides the panel %d seconds after %s is marked."):format(HIDE_DELAY, NPC_NAME))
   Checkbox("lock", "Lock panel position", "Stops the panel from being dragged by accident. Preview from this page still lets you move it.")
   do
@@ -592,15 +683,20 @@ handlers.ADDON_LOADED = function(name)
 end
 
 handlers.PLAYER_ENTERING_WORLD = function()
-  -- Every loading screen is a fresh run, so start the search over even when
-  -- the last place we were was also a delve.
-  state.inDelve = false
+  -- Every loading screen is a fresh run, so close out the last one (hiding the
+  -- panel) before deciding whether the new place needs it.
+  if state.active then
+    state.active = false
+    EndSearch()
+  end
   RefreshDelveState()
-  -- Instance info can lag a moment after the loading screen; check again.
+  -- Instance and map pin info can lag a moment after the loading screen.
   C_Timer.After(2, RefreshDelveState)
+  C_Timer.After(5, RefreshDelveState)
 end
 
 handlers.ZONE_CHANGED_NEW_AREA = RefreshDelveState
+handlers.AREA_POIS_UPDATED = RefreshDelveState
 
 handlers.PLAYER_REGEN_ENABLED = function()
   if state.pendingVisibility then ApplyVisibility() end
@@ -695,8 +791,16 @@ SlashCmdList.DUNDUNFINDER = function(input)
     Print("announcements %s.", OnOff(db.announce))
 
   elseif cmd == "panel" or cmd == "frame" or cmd == "button" then
-    SetSettingValue("showFrame", not db.showFrame)
-    Print("panel %s.", OnOff(db.showFrame))
+    if state.dismissed and db.showFrame then
+      -- Closed with the X: bring it back rather than turning the setting off.
+      state.dismissed = false
+      StartNudging()
+      ApplyVisibility()
+      Print("panel shown.")
+    else
+      SetSettingValue("showFrame", not db.showFrame)
+      Print("panel %s.", OnOff(db.showFrame))
+    end
 
   elseif cmd == "nudge" then
     local seconds = tonumber(rest)
