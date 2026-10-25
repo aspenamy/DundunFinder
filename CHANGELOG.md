@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Fixed the "Unrecognized XML attribute" warnings about the keybind when the game loads.
+
 ## 0.3.0
 
 - Updated for 12.1.5.

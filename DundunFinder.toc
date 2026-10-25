@@ -9,4 +9,3 @@
 ## SavedVariables: DundunFinderDB
 
 DundunFinder.lua
-Bindings.xml
